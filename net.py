@@ -29,13 +29,6 @@ class Net:
         controller_port= 6633
         self.net = Mininet(topo=topo, controller=lambda name: RemoteController(name, ip=controller_ip, port=controller_port))
         self.net.start()
-        #STP protocol
-        for i in range (1,4):
-            switch_name= f's{i}'
-            switch= self.net.get(switch_name)
-            switch.cmd(f'ovs-vsctl set bridge switch{switch_name} stp-enable=true')
-        print("dumoing host connections")
-        dumpNodeConnections(self.net.hosts)
         #Testing network 
         self.net.pingAll()
         self.net.pingAll()
@@ -72,25 +65,30 @@ class Net:
                     self.data[key]['time'] = []
                     self.data[key]['load'] = []
 
+    def start_server(self, host):
+        info(f'*** starting server on {host} ***\n')
+        h= self.net.get(host)
+        h.cmd("python3 -m http.server 80 &")
 
-    #L'host 1 attaccherà 2 e l'host 3 attaccherà 4
+    
     def start_attack(self):
-        info('*** starting attack ***')
+        info('*** starting attack ***\n')
 
         #host che attaccheranno
         h1= self.net.get('h1')
         h3= self.net.get('h3')
+        #host attaccati
         ip2= self.net.get('h2').IP()
         ip4= self.net.get('h4').IP()
         
         #attacco
-        h1.cmd(f"hping3 {ip2} --flood --udp &")
-        h3.cmd(f"hping3 {ip4} --flood --udp &")
+        h1.cmd(f"hping3 --flood --rand-source --udp -p 80 {ip2} &")
+        h3.cmd(f"hping3 --flood --rand-source --udp -p 80 {ip4} &")
         
 
     #Fermo l'attacco
     def stop_attack(self):
-        info('*** stopping attack ***')
+        info('*** stopping attack ***\n')
         cmd= "killall hping3"
         Popen(cmd, shell=True).wait()
 
@@ -115,18 +113,44 @@ class Net:
         print(output)
 
     def main(self):
-        setLogLevel('info')
-        self.start_net()
-        self.start_monitor()
-        sleep(5)    #Durata del monitoring prima dell'attacco
-        self.start_attack()
-        sleep(10)    #Durata del monitoring durante l'attacco
-        self.stop_attack()
-        sleep(5)    #Durata del monitoring dopo aver stoppato l'attacco
-        self.stop_monitor()
-        self.fill_data()
-        self.plot_latency_for_all_switches('all_switches.png')
-        self.stop_net()
+
+        try:
+            setLogLevel('info')
+            self.start_net()
+            self.start_monitor()
+            sleep(5)    #Durata del monitoring prima dell'attacco
+            self.start_server('h2')
+            sleep(1)
+            self.start_server('h4')
+            sleep(1)
+
+            info('*** checking connettivity before the attack ***')
+            self.check_host_connettivity('h1' , 'h2')
+            sleep(1)
+            self.check_host_connettivity('h3' , 'h4')
+            sleep(1)
+
+            self.start_attack()
+            sleep(15)    #Durata del monitoring durante l'attacco
+
+            info('*** checking connettivity after the attack ***')
+            self.check_host_connettivity('h1' , 'h2')
+            sleep(1)
+            self.check_host_connettivity('h3' , 'h4')
+            sleep(5)
+
+            self.stop_attack()
+            sleep(5)    #Durata del monitoring dopo aver stoppato l'attacco
+            self.stop_monitor()
+            self.fill_data()
+            self.plot_latency_for_all_switches('all_switches.png')
+            self.stop_net()
+        except KeyboardInterrupt:
+            self.stop_attack
+            self.stop_net
+            self.stop_monitor
+            self.clear_net
+            
 
 
 if __name__ == '__main__':
