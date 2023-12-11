@@ -9,13 +9,22 @@ import csv
 from .topo import CustomTopology
 import matplotlib.pyplot as plt
 from copy import copy
+from scapy.all import sniff, IP
+from threading import Thread
+import threading
+import time
 
 
 class Net:
 
     def __init__(self):
         self.tmp = 'tmp.txt'
+        self.output_json = 'output_json.txt'
         self.data = {}
+        self.des_ips = {}
+        self.interfaces= []
+        self.releved_intf= []
+        self.running= True
 
     def clear_net(self):
         #Clears evrything going on the network
@@ -32,6 +41,7 @@ class Net:
         #Testing network 
         self.net.pingAll()
         self.net.pingAll()
+        self.get_mininet_interfaces()
 
     def stop_net(self):
         info('*** stopping net ***\n')
@@ -64,6 +74,7 @@ class Net:
                     self.data[key] = {}
                     self.data[key]['time'] = []
                     self.data[key]['load'] = []
+
 
     def start_server(self, host):
         info(f'*** starting server on {host} ***\n')
@@ -112,46 +123,112 @@ class Net:
         output= h.cmdPrint(f"ping -c 15 {ip_target}")
         print(output)
 
-    def main(self):
+    def get_mininet_interfaces(self):
+
+        info('*** getting interfaces ***\n')
 
         try:
-            setLogLevel('info')
-            self.start_net()
-            self.start_monitor()
-            sleep(5)    #Durata del monitoring prima dell'attacco
-            self.start_server('h2')
-            sleep(1)
-            self.start_server('h4')
-            sleep(1)
+            self.interfaces = [intf.name for switch in self.net.switches for intf in switch.intfs.values() if 'lo' not in intf.name]
+        except Exception as e:
+            print(f"Error while getting Mininet interfaces: {e}")
 
-            info('*** checking connettivity before the attack ***')
-            self.check_host_connettivity('h1' , 'h2')
-            sleep(1)
-            self.check_host_connettivity('h3' , 'h4')
-            sleep(1)
 
-            self.start_attack()
-            sleep(15)    #Durata del monitoring durante l'attacco
 
-            info('*** checking connettivity after the attack ***')
-            self.check_host_connettivity('h1' , 'h2')
-            sleep(1)
-            self.check_host_connettivity('h3' , 'h4')
-            sleep(5)
+    def packet_callback(self, packet):
+        try:
+            if IP in packet:
+                des_ip = packet[IP].dst
 
-            self.stop_attack()
-            sleep(5)    #Durata del monitoring dopo aver stoppato l'attacco
-            self.stop_monitor()
-            self.fill_data()
-            self.plot_latency_for_all_switches('all_switches.png')
-            self.stop_net()
-        except KeyboardInterrupt:
-            self.stop_attack
-            self.stop_net
-            self.stop_monitor
-            self.clear_net
+                if des_ip in self.des_ips:
+                    self.des_ips[des_ip] += 1
+                else:
+                    self.des_ips[des_ip] = 1
+                
+        except Exception as e:
+            print(f"Error in packet_callback: {e}")
+
+    def packet_counter(self, interface, soglia_attacco=500):
+        try:
+            # Avvia lo sniffing in un thread separato
+            sniff_thread = Thread(target=self.sniff_packets, args=(interface,))
+            sniff_thread.start()
+
+            # Attendi il completamento dello sniffing
+            sniff_thread.join()
+
+            # Controllo del volume di traffico dopo il periodo specificato
+            for des_ip, count in self.des_ips.items():
+                if count/10 > soglia_attacco:
+                    if des_ip not in self.releved_intf:
+                        self.releved_intf.append(des_ip)
+                        print(f"Attacco rilevato verso {des_ip} con {count/10} pacchetti al secondo!")
+
+        except Exception as e:
+            print(f"Error while sniffing: {e}")
+
+    def sniff_packets(self, interface):
+        try:
+            # Imposta il tempo di inizio dello sniffing
+            start_time = time.time()
+
+            # Esegui lo sniffing fino al raggiungimento della durata specificata
+            while time.time() - start_time < 11:
+                sniff(prn=self.packet_callback, filter="udp", iface=interface, timeout=1)
+
+        except Exception as e:
+            print(f"Error while sniffing: {e}")
+
+    def network_defender(self):
+        while True:
+            if self.running:
+                for intf in self.interfaces:
+                    self.packet_counter(intf)
+                sleep(5)
+            else:
+                break
+
             
 
+    def main(self):
+
+        setLogLevel('info')
+        self.start_net()
+        background_thread = threading.Thread(target=self.network_defender, daemon=True)
+        background_thread.start()
+        self.start_monitor()
+        sleep(5)    #Durata del monitoring prima dell'attacco
+        self.start_server('h2')
+        sleep(1)
+        self.start_server('h4')
+        sleep(1)
+
+        '''
+        info('*** checking connettivity before the attack ***\n')
+        self.check_host_connettivity('h1' , 'h2')
+        sleep(1)
+        self.check_host_connettivity('h3' , 'h4')
+        sleep(5)
+        '''
+
+        self.start_attack()
+        sleep(120)
+
+        '''
+        info('*** checking connettivity after the attack ***\n')
+        self.check_host_connettivity('h1' , 'h2')
+        sleep(1)
+        self.check_host_connettivity('h3' , 'h4')
+        sleep(5)
+        '''
+
+        self.stop_attack()
+        sleep(5)
+        self.stop_monitor()
+        self.fill_data()
+        self.plot_latency_for_all_switches('all_switches.png')
+        self.running= False
+        background_thread.join()
+        self.stop_net()
 
 if __name__ == '__main__':
     n= Net()
