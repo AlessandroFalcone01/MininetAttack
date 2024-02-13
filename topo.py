@@ -1,5 +1,4 @@
 from mininet.topo import Topo
-from mininet.node import RemoteController
 
 class CustomTopology(Topo):
     def build(self):
