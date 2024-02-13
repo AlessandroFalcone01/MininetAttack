@@ -6,60 +6,62 @@ from mininet.cli import CLI
 from subprocess import Popen
 from time import sleep
 import csv
-import sys
-import os
 from .topo import CustomTopology
-import pandas as pd
 import matplotlib.pyplot as plt
 from copy import copy
+from scapy.all import sniff, IP
+from threading import Thread
+from random import randrange, choice
+
 
 class Net:
 
     def __init__(self):
         self.tmp = 'tmp.txt'
         self.data = {}
+        self.controller_ip = '192.168.1.26'
+        self.controller_port = 6633
 
+    #Clears everything going on the network
     def clear_net(self):
-        #Puliamo qualsiasi cosa ci sia in esecuzione su mininet
         info('*** Clearing net... ***')
         cmd = "mn -c"
         Popen(cmd, shell=True).wait()
 
+    #Starts the net with the given topo and enables STP for all the switches
     def start_net(self):
-        #Creo la rete
         topo= CustomTopology()
-        controller_ip= '192.168.56.8'
-        controller_port= 6633
-        self.net = Mininet(topo=topo, controller=lambda name: RemoteController(name, ip=controller_ip, port=controller_port))
+        self.net = Mininet(topo=topo, controller=lambda name: RemoteController(name, ip=self.controller_ip, port=self.controller_port))
         self.net.start()
-        #Abilito il protocollo STP per gli switch
-        for i in range (1,4):
-            switch_name= f's{i}'
-            switch= self.net.get(switch_name)
-            switch.cmd(f'ovs-vsctl set bridge switch{switch_name} stp-enable=true')
-        #Testo la rete
+        for i in range(1, 4):
+            s = self.net.get(f's{i}')
+            s.cmd(f'ovs-vsctl set bridge s{i} stp-enable=true')
+        info("Dumping host connections\n")
+        dumpNodeConnections(self.net.hosts)
+        info("Testing network connectivity\n")
         self.net.pingAll()
         self.net.pingAll()
-        return self.net
 
-    #Fermo la rete
+    #Stops the net
     def stop_net(self):
+        info('*** Stopping net ***\n')
         self.net.stop()
 
-    #Monitoro la rete (quantità di dati trsmeessi/ricevuti per unità di tempo) e salvo i dati su un file
+    #Starts monitoring the net (data transmitted/received by time) then saves data in a file
     def start_monitor(self):
-        info('*** Start monitor\n')
+        info('*** Start monitor ***\n')
         cmd = f"bwm-ng -o csv -T rate -C ',' > {self.tmp} &"
         Popen(cmd, shell=True).wait()
 
-    #Smetto di monitorare la rete
+    #Stops monitoring the net
     def stop_monitor(self):
-        info('*** Stop monitor\n')
+        info('*** Stop monitor ***\n')
         cmd = "killall bwm-ng"
         Popen(cmd, shell=True).wait()
 
-    #Leggo il file csv e carico le informazioni che mi servono in data
+    #Read the monitoring file and fill up data structure
     def fill_data(self):
+        info('*** Filling data ***\n')
         with open(self.tmp) as csvf:
             csvr = csv.reader(csvf, delimiter=',')
             for row in csvr:
@@ -74,24 +76,35 @@ class Net:
                     self.data[key]['time'] = []
                     self.data[key]['load'] = []
 
-    #L'host 1 attaccherà 2 e l'host 3 attaccherà 4
+    #Starts a server on the given host
+    def start_server(self, host):
+        info(f'*** Starting server on {host} ***\n')
+        h= self.net.get(host)
+        h.cmd("python3 -m http.server 80 &")
+
+    #Generate flood of udp packets 
     def start_attack(self):
         info('*** Starting attack ***\n')
+
         h1= self.net.get('h1')
         h3= self.net.get('h3')
+        h4= self.net.get('h4')
         ip2= self.net.get('h2').IP()
-        ip4= self.net.get('h4').IP()
-        h1.cmd(f"hping3 --flood --udp {ip2} &")
-        h3.cmd(f"hping3 --flood --udp {ip4} &")
+        
+        h1.cmd(f"hping3 --flood --rand-source --udp -p 80 {ip2} &")
+        h3.cmd(f"hping3 --flood --rand-source --udp -p 80 {ip2} &")
+        h4.cmd(f"hping3 --flood --rand-source --udp -p 80 {ip2} &")
+        
 
-    #Fermo l'attacco
+    #Stops all flooding flows
     def stop_attack(self):
         info('*** Stopping attack ***\n')
         cmd= "killall hping3"
         Popen(cmd, shell=True).wait()
 
-    #Creo un garfico a dispersione e lo salvo come immagine
+    #Generates a plot and save it as image 
     def plot_latency_for_all_switches(self, output_file):
+        info('*** Printing data ***\n')
         for switch_key in self.data.keys():
             values = self.data[switch_key]
             plt.scatter(values['time'], values['load'], label=f'{switch_key} - Load', alpha=0.5)
@@ -102,33 +115,53 @@ class Net:
         plt.title('Load over Time for Each Switch')
         plt.savefig(output_file)
 
+    #Check the connectivity between two hosts
     def check_host_connettivity(self, host, target):
         h= self.net.get(host)
         ip_target= self.net.get(target).IP()
+        
+        h.cmdPrint(f"ping -c 5 {ip_target}")
 
-        if h.cmd(f"ping {ip_target} &").count('1 packets transmitted, 1 received')>0:
-            return True
-        else:
-            return False
+    #Generate an ip among the net ones
+    def ip_generator(self):
+        ip = ".".join(["10","0","0",str(randrange(1,5))])
+        return ip
+    
+    #Generate regular traffic in the net
+    def generate_legitimate_traffic(self):
+        info('*** Generating legitimate traffic ***\n')
+        h1= self.net.get('h1')
+        h2= self.net.get('h1')
+        h3= self.net.get('h3')
+        h4= self.net.get('h4')
 
+        hosts=[h1, h2, h3, h4]
 
-    def main(self):
-        self.clear_net()
+        for i in range(5):
+            src= choice(hosts)
+            dst= self.ip_generator()
+
+            src.cmd("ping {} -c 5 &".format(dst))
+
+    def run(self):
+
+        setLogLevel('info')
         self.start_net()
         self.start_monitor()
-        sleep(5)    #Durata del monitoring prima dell'attacco
+        sleep(5)
+        self.start_server('h2')
+        sleep(1)
 
-        while self.check_host_connettivity('h1', 'h2') and self.check_host_connettivity('h3', 'h4'):
-            self.start_attack()
-        
+        self.generate_legitimate_traffic()
+
+        sleep(30)
+
+        self.start_attack()
+        sleep(60)
+
         self.stop_attack()
-        sleep(5)    #Durata del monitoring dopo aver stoppato l'attacco
+        sleep(5)
         self.stop_monitor()
         self.fill_data()
         self.plot_latency_for_all_switches('all_switches.png')
         self.stop_net()
-
-
-if __name__ == '__main__':
-    n= Net()
-    n.main()
